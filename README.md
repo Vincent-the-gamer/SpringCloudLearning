@@ -240,7 +240,7 @@ public class ApplicationContextConfig {
 
 
 
-### Actuator微服务信息完善
+#### Actuator微服务信息完善
 
 主要是以下两点：
 
@@ -266,7 +266,7 @@ eureka:
 
 
 
-### 服务发现 Discovery
+#### 服务发现 Discovery
 
 对于注册进eureka里面的微服务，可以通过服务来获得该服务的信息
 
@@ -319,7 +319,7 @@ public Object discovery(){
 
 
 
-### Eureka自我保护
+#### Eureka自我保护
 
 保护模式主要用于一组客户端和Eureka Server之间存在网络分区场景下的保护。一旦进入保护模式，
 
@@ -341,5 +341,123 @@ public Object discovery(){
 
 
 
-未完待续。。。。
+#### 怎么禁止自我保护？
+
+Eureka默认开启了自我保护。
+
+要想关闭，要对Server和Client都做一些操作。
+
+Server端：
+
+~~~yaml
+# 在application.yml中
+eureka:
+    ## 此处省略##
+    server:
+        # 关闭自我保护机制，包装不可用服务被及时删除
+        enable-self-preservation: false
+        # 关闭自我保护机制的定时器，2000毫秒后关闭
+        eviction-interval-timer-in-ms: 2000
+~~~
+
+Client端：
+
+~~~yaml
+# 在application.yml中
+eureka:
+    ## 此处省略##
+    instance:
+        instance-id: payment8001
+        # 访问路径可以显示IP地址
+        prefer-ip-address: true
+        # Eureka客户端向客户端发送心跳的时间间隔，单位为秒（默认是30秒）
+        lease-renewal-interval-in-seconds: 1
+        # Eureka服务端在收到最后一次心跳后等待时间上限，单位为秒（默认90秒），超时将剔除服务
+        lease-expiration-duration-in-seconds: 2
+~~~
+
+
+
+这样自我保护机制就关闭了，如果之后Client宕机了，在设定的时间以后，就会自动被Server移除。
+
+
+
+#### Eureka停更说明
+
+在https://github.com/Netflix/eureka/wiki，可以看到Eureka 2.0已经停更了，Eureka基本不咋用了，深入的东西就没必要了，所以用SpringCloud整合ZooKeeper代替Eureka。
+
+
+
+### ZooKeeper服务注册与发现
+
+#### ZooKeeper是啥？
+
+ZooKeeper是一个分布式协调工具，可以实现注册中心功能，取代Eureka服务器作为服务注册中心。
+
+#### ZooKeeper服务是否持久
+
+ZooKeeper**不是持久性的**，当你关闭Client以后一段时间，ZooKeeper就会检测到这个Client没有心跳了，然后就把服务干掉了。
+
+#### 搭建单机ZooKeeper Server
+
+具体过程请看这篇文档：
+
+[如何搭建zookeeper单机实例](./搭建zookeeper.md)
+
+#### 对单机ZooKeeper进行服务注册
+
+还是老套路，注册生产者和消费者
+
+pom.xml不再引入eureka相关的东西，而是引入：
+
+~~~xml
+  <!--  引入zookeeper -->
+  <dependency>
+      <groupId>org.apache.zookeeper</groupId>
+      <artifactId>zookeeper</artifactId>
+      <version>3.8.0</version>    <!-- 这里看你的zookeeper版本 -->
+  </dependency>
+    <!-- 用于Zookeeper服务发现 -->
+  <dependency>
+      <groupId>org.springframework.cloud</groupId>
+      <artifactId>spring-cloud-starter-zookeeper-discovery</artifactId>
+  </dependency>
+~~~
+
+
+
+application.yml这么写
+
+~~~yaml
+server:
+  port: 8004
+  
+# 省略数据库配置和MyBatis配置
+
+# 服务别名，注册zookeeper的注册中心名称
+spring:
+  application:
+    name: cloud-provider-payment
+  cloud:
+    zookeeper:
+      connect-string: 你的Zookeeper实例所在服务器:2181
+~~~
+
+其它基本一样
+
+**关于Zookeeper集群的配置，请查看这篇文档：[如何搭建zookeeper模拟集群](./搭建zookeeper.md)**
+
+**服务注册方法和Eureka类似，这里就先不写了。**
+
+
+
+### Consul服务注册与发现
+
+未完待续。。。
+
+
+
+
+
+
 
