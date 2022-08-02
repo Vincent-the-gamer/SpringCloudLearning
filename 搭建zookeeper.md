@@ -1,4 +1,5 @@
 # 在Windows Server上搭建zookeeper单机实例和模拟集群
+## 作者：诡锋    B站：-诡锋丿Lavafall-
 
 本次部署版本为3.8.0版本，下载地址http://mirrors.cnnic.cn/apache/zookeeper/
 
