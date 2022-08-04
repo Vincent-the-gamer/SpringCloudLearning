@@ -746,24 +746,436 @@ IRule是一个Java接口（Interface），功能是根据特定算法从服务�
 * AvailabilityFilteringRule：先过滤掉故障实例，再选择并发较小的实例
 * ZoneAvoidanceRule：**默认规则**，复合判断server所在区域的性能和server的可用性选择服务器。
 
+#### Ribbon负载规则替换
+
+**<font color="red">官方文档明确给出了警告：</font>**
+
+**<font color="red">这个自定义配置类不能放在@ComponentScan所扫描的当前包下以及子包下，否则我们自定义的这个配置类就会被所有的Ribbon客户端所共享，达不到特殊化定制的目的了</font>**
+
+**说人话就是，不要放在SpringBootApplication启动类所在的包以及它的所有子包里面。**
+
+单独建一个包myrule
+
+创建MySelfRule类
+
+~~~java
+@Configuration
+public class MySelfRule {
+    @Bean
+    public IRule myRule(){
+         return new RandomRule();  //定义为随机规则
+    }
+}
+
+~~~
+
+然后在主启动类里面加入@RibbonClient
+
+~~~java
+@SpringBootApplication
+@EnableEurekaClient
+@RibbonClient(name = "cloud-payment-service",configuration = MySelfRule.class)
+public class OrderMain80 {
+    public static void main(String[] args) {
+        SpringApplication.run(OrderMain80.class, args);
+    }
+}
+~~~
+
+#### Ribbon负载均衡轮询(RoundRobinRule)算法原理
+
+**<font color="red">负载均衡原理：</font>**
+
+**<font color="red">rest接口第几次请求数 % 服务器集群总数量 = 实际调用服务器位置下标</font>**
+
+**每次服务重启动后rest接口计数从1开始。**
+
+~~~java
+List<ServiceInstance> instances = discoveryClient.getInstances("cloud-payment-service");
+~~~
+如：
+
+~~~java
+ instances[0] = 127.0.0.1:8002
+ instances[1] = 127.0.0.1:8001
+~~~
+
+8001 + 8002组合成为集群，他们共计2台机器，集群总数为2，按照轮询算法原理：
+
+当总请求数为1时：1%2 =1 对应下标位置为1，则获得服务地址为：127.0.0.1:8001
+
+当总请求数为2时：2%2 =0 对应下标位置为0，则获得服务地址为：127.0.0.1:8002
+
+当总请求数为3时：3%2 =1 对应下标位置为1，则获得服务地址为：127.0.0.1:8001
+
+当总请求数为4时：4%2 =0 对应下标位置为0，则获得服务地址为：127.0.0.1:8002
+
+........
+
+#### 手写轮询算法
+
+   原理：JUC (CAS + 自旋锁)
+
+先关掉ApplicationBeanContext中的@LoadBalanced，然后自己写
+
+定义一个接口：
+
+~~~java
+public interface LoadBalancer {
+    ServiceInstance instances(List<ServiceInstance> serviceInstances);
+}
+~~~
+
+实现接口，写算法：
+
+~~~java
+@Component
+public class MyLoadBalancer implements LoadBalancer{
+    private AtomicInteger atomicInteger = new AtomicInteger(0);
+    public final int getAndIncrement(){
+        int current;
+        int next;
+        do{
+            current = this.atomicInteger.get();
+            next = current >= 2147483647 ? 0 : current + 1;
+
+        }while(!this.atomicInteger.compareAndSet(current,next));
+        System.out.println("第几次访问，次数next: " + next);
+        return next;
+    }
+
+    @Override
+    public ServiceInstance instances(List<ServiceInstance> serviceInstances) {
+        int index = getAndIncrement() % serviceInstances.size();
+        return serviceInstances.get(index);
+    }
+}
+
+~~~
+
+在消费者Order80的Controller中使用
+
+~~~java
+ @Resource
+ private LoadBalancer loadBalancer;
+
+//这里需要预先在Provider里面提供/payment/lb接口
+    @GetMapping(value = "/consumer/payment/lb")
+    public String getPaymentLB(){
+        List<ServiceInstance> instances = discoveryClient.getInstances("cloud-payment-service");
+        if(instances == null || instances.size() <= 0){
+            return null;
+        }
+
+        ServiceInstance serviceInstance = loadBalancer.instances(instances);
+        URI uri = serviceInstance.getUri();
+
+        return restTemplate.getForObject(uri+"/payment/lb",String.class);
+  }
+~~~
+
+### OpenFeign服务调用
+
+早期的Feign已经停止更新，所以不需要研究了
+
+#### Feign是啥？
+
+Feign是一个声明式WebService客户端，使用Feign能让编写Web Service客户端更加简单。它的使用方法是**定义一个服务接口然后再上面添加注解**。Feign也支持可拔插式的编码器和解码器。
+
+#### OpenFeign是啥？
+
+OpenFeign是Spring Cloud在Feign的基础上支持了SpringMVC的注解，如@RequestMapping等等。OpenFeign的@FeignClient可以解析SpringMVC的@RequestMapping注解下的接口，并通过动态代理的方式产生实现类，实现类中做负载均衡并调用其他服务。
+
+**注意：Feign是在消费者使用**
+
+#### 使用OpenFeign
+
+**OpenFeign 2.x.x自带Ribbon负载均衡配置项，使用的是轮询算法**
+
+在消费者里面的pom.xml中引入：
+
+~~~xml
+        <!-- openfeign -->
+        <dependency>
+            <groupId>org.springframework.cloud</groupId>
+            <artifactId>spring-cloud-starter-openfeign</artifactId>
+        </dependency>
+~~~
+
+**注意：OpenFeign 2.x.x版本中整合了Ribbon，但是3版本就没有整合Ribbon了，在本笔记中，使用的是2.2.1版本，所以自带Ribbon。**
+
+现在主启动类添加@EnableFeignClients注解
+
+~~~java
+@SpringBootApplication
+@EnableFeignClients
+public class OrderFeignMain80 {
+    public static void main(String[] args) {
+        SpringApplication.run(OrderFeignMain80.class, args);
+    }
+}
+
+~~~
+
+然后创建接口，添加注解@FeignClient(value = "cloud-payment-service")，注意value填的是提供者的服务名称
+
+~~~java
+@FeignClient(value = "cloud-payment-service")
+public interface PaymentFeignService {
+    @GetMapping(value = "/payment/get/{id}")
+    public CommonResult<Payment> getPaymentById(@Param("id") Long id);
+}
+~~~
+
+#### OpenFeign超时控制
+
+1. 模拟超时错误
+
+OpenFeign默认等待1秒钟，所以如果我们让线程停留3秒来模拟超时，就可以发现报错：Read Timed out
+
+在提供者8001里面的Controller:
+
+~~~java
+  //模拟Feign超时控制的接口,这里线程停3秒，feign默认只等待1秒
+    @GetMapping(value = "/payment/feign/timeout")
+    public String paymentFeignTimeout(){
+        //暂停几秒钟线程
+        try{
+            TimeUnit.SECONDS.sleep(3);
+        } catch (InterruptedException e){
+            e.printStackTrace();
+        }
+        return serverPort;
+    }
+~~~
+
+然后还是在Feign消费者的接口里面写入
+
+~~~java
+ @GetMapping(value = "/payment/feign/timeout")
+    String paymentFeignTimeout();
+~~~
+
+在Feign消费者的Controller写入：
+
+~~~java
+   @GetMapping(value = "/consumer/payment/feign/timeout")
+    public String paymentFeignTimeout(){
+        //openfeign-ribbon，客户端一般默认等待1秒
+        return paymentFeignService.paymentFeignTimeout(); //这边要花3秒钟
+    }
+~~~
+
+2. 对超时进行控制：
+
+   在OpenFeign管理的消费者的application.yml中写入
+
+   ~~~yaml
+   feign:
+     client:
+       config:
+         default:
+           # 设置feign客户端超时时间
+           # 指的是建立连接后从服务器读取到可用资源所用的时间，单位：毫秒
+           read-timeout: 5000
+           # 指的是建立连接所用的时间，适用于网络状况正常的情况下，两端连接所用的时间
+           connect-timeout: 5000
+   
+   ~~~
+
+   然后发现可以正常等3秒访问了。
+
+   
+
+#### OpenFeign日志打印功能
+
+Feign提供了日志打印功能，我们可以通过配置来调整日志级别，从而了解 Feign 中 HTTP 请求的细节。
+
+说人话就是**<font color="red">对Feign接口的调用情况进行监控和输出</font>**。
 
 
-未完待续。。。
+
+##### 日志级别
+
+* NONE: 默认的，不显示任何日志
+* BASIC: 仅记录请求方法、URL、响应状态码及执行时间
+* HEADERS: 除了BASIC中定义的信息之外，还有请求头和响应头信息
+* FULL: 除了HEADERS中定义的信息之外，还有请求和响应的正文及元数据。
+
+在OpenFeign的消费者模块里面，建一个config包，写一个配置类
+
+~~~java
+@Configuration
+public class FeignConfig {
+    @Bean
+    Logger.Level feignLoggerLevel(){
+        return Logger.Level.FULL;
+    }
+}
+~~~
+
+然后在application.yml中添加：
+
+~~~yaml
+logging:
+  level:
+    # feign日志以什么级别监控哪个接口
+    application.service.PaymentFeignService: debug
+~~~
 
 
 
+配置完成后，当调用这个消费者接口后，就可以在对应的服务器查看到日志了
+
+~~~
+2022-08-04 14:42:51.293 DEBUG 7612 --- [p-nio-80-exec-1] application.service.PaymentFeignService  : [PaymentFeignService#getPaymentById] <--- HTTP/1.1 200 (246ms)
+2022-08-04 14:42:51.293 DEBUG 7612 --- [p-nio-80-exec-1] application.service.PaymentFeignService  : [PaymentFeignService#getPaymentById] connection: keep-alive
+2022-08-04 14:42:51.293 DEBUG 7612 --- [p-nio-80-exec-1] application.service.PaymentFeignService  : [PaymentFeignService#getPaymentById] content-type: application/json
+2022-08-04 14:42:51.293 DEBUG 7612 --- [p-nio-80-exec-1] application.service.PaymentFeignService  : [PaymentFeignService#getPaymentById] date: Thu, 04 Aug 2022 06:42:51 GMT
+2022-08-04 14:42:51.293 DEBUG 7612 --- [p-nio-80-exec-1] application.service.PaymentFeignService  : [PaymentFeignService#getPaymentById] keep-alive: timeout=60
+2022-08-04 14:42:51.293 DEBUG 7612 --- [p-nio-80-exec-1] application.service.PaymentFeignService  : [PaymentFeignService#getPaymentById] transfer-encoding: chunked
+2022-08-04 14:42:51.294 DEBUG 7612 --- [p-nio-80-exec-1] application.service.PaymentFeignService  : [PaymentFeignService#getPaymentById] 
+2022-08-04 14:42:51.295 DEBUG 7612 --- [p-nio-80-exec-1] application.service.PaymentFeignService  : [PaymentFeignService#getPaymentById] {"code":200,"message":"查询成功,服务器端口为：8001","data":{"id":1,"serial":"老电线"}}
+2022-08-04 14:42:51.295 DEBUG 7612 --- [p-nio-80-exec-1] application.service.PaymentFeignService  : [PaymentFeignService#getPaymentById] <--- END HTTP (100-byte body)
+2022-08-04 14:42:52.124  INFO 7612 --- [erListUpdater-0] c.netflix.config.ChainedDynamicProperty  : Flipping property: cloud-payment-service.ribbon.ActiveConnectionsLimit to use NEXT property: niws.loadbalancer.availabilityFilteringRule.activeConnectionsLimit = 2147483647
+~~~
 
 
 ## 服务降级
 
+### 分布式系统面临的问题
+
+复杂分布式体系结构中的应用程序有**数十个依赖关系**，每个依赖关系在某些时候将不可避免的失败。
+
+![](http://124.222.43.240:2334/upload/2022-8-4$16214Y37GZ.png)
 
 
-## 服务网关
+
+#### 服务雪崩
+
+多个微服务之间调用的时候，假设微服务A调用微服务B和微服务C，微服务B和微服务C又调用其它的服务，这就是**<font color="red">"扇出"</font>**。如果扇出的链路上某个微服务的调用响应时间过长或者不可用，对微服务A的调用就会占用越来越多的系统资源，进而引起系统崩溃，所谓的”雪崩效应“。
 
 
 
-## 服务配置
+### Hystrix
 
+Hystrix是一个用于处理分布式系统的**延迟**和**容错**的开源库，在分布式系统里，许多依赖不可避免的会调用失败，比如超时，异常等。Hystrix能够保证在一个依赖出问题的情况下，**不会导致整体服务失败，避免级联故障，以提高分布式系统的弹性。**
+
+
+
+“断路器” 本身是一种开关装置，当某个服务单元发生故障之后，通过断路器的故障监控（类似熔断保险丝），**向调用方返回一个符合预期的、可处理的备选响应(Fallback)，而不是长时间的等待或抛出调用方无法处理的异常**，这样就保证了服务调用方的线程不会被长时间、不必要地占用，从而避免了故障在分布式系统中的蔓延，乃至雪崩。
+
+#### Hystrix能干啥？
+
+* 服务降级
+* 服务熔断
+* 接近实时的监控
+* .....
+
+#### Hystrix官网资料（Github）
+
+官网：https://github.com/Netflix/Hystrix
+
+使用教程（老了）https://github.com/Netflix/Hystrix/wiki/How-To-Use
+
+<font color="red">**Hystrix官宣，停更进入维护**</font>
+
+
+
+#### Hystrix重要概念
+
+* **服务降级（Fallback)**
+
+  说人话：
+
+  ​    服务器忙，请稍后再试，不让服务器等待并立刻返回一个友好提示Fallback
+
+  哪些情况会触发服务降级：
+
+  * 程序运行异常
+  * 超时
+  * 服务熔断
+  * 线程池/信号量打满
+
+  
+
+* **服务熔断 (Break)**
+
+  类比保险丝：
+
+  服务达到最大访问量后，直接拒绝访问，拉闸限电，先熔断
+
+  然后调用服务降级的方法返回友好提示。
+
+  服务降级 => 熔断 =》 恢复调用链路
+
+  
+
+* **服务限流 (Flowlimit)**
+
+​       秒杀、高并发等操作，严禁一窝蜂的拥挤，让访问线程排队，一秒钟N个，有序进行。
+
+
+
+#### Hystrix案例
+
+* **构建**
+
+使用单机Eureka服务注册中心来做，把7001变成单机的就好
+
+配置一个用到Hystrix的module，具体代码参考cloud-provider-hystrix-payment8001
+
+* **高并发测试**
+
+  上面的案例在非高并发下还能撑住
+
+  **Jmeter压力测试：（我就不测了，舍不得烧电脑，这段看视频吧，第51p，大概2:50左右）**
+
+  开启Jmeter，用20000个并发干死8001，这20000个请求都去访问那个paymentInfo_Timeout服务
+
+  **测试参数：**
+
+  **添加线程组，线程数200，循环次数100**
+
+  **在线程组中添加sampler的HTTP请求去请求服务即可**
+
+  **测试结果：**
+
+  **导致的结果就是服务器响应不过来，访问转圈圈，或者直接CPU负载过大。**
+
+  **而且同一个微服务里面其它接口也寄了，直接卡死。**
+
+​      上面还只是服务**提供者8001自己测试**，假如此时外部的消费者80也来访问，那**消费者**只能干等，最终导致消费端80不满意，服务端8001直接被拖死。
+
+​      接下来启动压测的时候让80消费者去访问，就会发现直接卡死了，要么转圈圈等待，要么报错，因为处理不过来了。代码写好了，压测想做的大家自己去用jmeter去搞2333。
+
+
+
+​      <font color="red">**故障现象和导致原因：**</font> 
+
+​      <font color="red">**8001同一层次的其它接口服务被困死，因为tomcat线程池里面的工作线程已经被挤占完毕。80此时调用8001，客户端访问响应缓慢，转圈圈。**</font> 
+
+* **上述结论**
+
+  正因为有上述故障或不佳表现，才有降级、容错、限流等技术诞生。
+
+* **如何解决？**
+
+  *  超时导致服务器变慢（转圈）
+
+  ​        解决： 超时不再等待
+
+  *  出错（宕机或程序运行出错）
+
+  ​        解决： 出错要有兜底
+
+  **解决办法：**
+
+  1. 提供者（8001）服务超时了，调用者（80）不能一直卡死等待，必须有服务降级。
+  2. 提供者（8001）服务宕机了，调用者（80）不能一直卡死等待，必须有服务降级。
+  3. 提供者（8001）服务OK，调用者（80）自己出故障或有自我要求（自己的等待时间小于服务提供者处理业务的时间），自己处理降级。
+
+未完待续。。。
 
 
 
