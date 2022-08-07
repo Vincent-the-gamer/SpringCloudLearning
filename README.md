@@ -1175,8 +1175,274 @@ Hystrix是一个用于处理分布式系统的**延迟**和**容错**的开源�
   2. 提供者（8001）服务宕机了，调用者（80）不能一直卡死等待，必须有服务降级。
   3. 提供者（8001）服务OK，调用者（80）自己出故障或有自我要求（自己的等待时间小于服务提供者处理业务的时间），自己处理降级。
 
-未完待续。。。
+  ##### Hystrix服务降级配置
 
+**服务降级一般在客户端配置**
+
+使用注解@HystrixCommand
+
+这里也对8001设置自身调用超时时间的峰值，峰值以内正常运行，超过峰值就需要做服务降级
+
+~~~java
+//这个方法一旦出事，就自动调用fallbackMethod,这里规定延时3秒钟以内算正常
+    @HystrixCommand(fallbackMethod = "paymentInfo_TimeOutHandler",commandProperties = {
+            @HystrixProperty(name = "execution.isolation.thread.timeoutInMilliseconds",value="3000")
+    })
+    public String paymentInfo_TimeOut(Integer id){
+        int timeNumber = 5;
+        try{
+            TimeUnit.SECONDS.sleep(timeNumber);
+        }catch (InterruptedException e){
+            e.printStackTrace();
+        }
+        return "线程池： " + Thread.currentThread().getName() + "   paymentInfo_Timeout,id:  " + id + "\t" + "O(∩_∩)O哈哈~ 耗时(秒)：" + timeNumber;
+    }
+
+    public String paymentInfo_TimeOutHandler(Integer id){
+        return "线程池： " + Thread.currentThread().getName() + "   paymentInfo_TimeOutHandler,id:  " + id + "\t" + "卧槽，寄了o(╥﹏╥)o";
+    }
+}
+
+~~~
+
+然后需要在主启动类里面去激活：
+
+~~~java
+@SpringBootApplication
+@EnableEurekaClient
+//@EnableCircuitBreaker 激活Hystrix相关功能（服务熔断，服务降级）
+@EnableCircuitBreaker
+public class PaymentHystrixMain8001 {
+    public static void main(String[] args) {
+        SpringApplication.run(PaymentHystrixMain8001.class, args);
+    }
+}
+~~~
+
+
+
+这里设置两种异常方式：
+
+1. 上面的代码是只接受服务运行时间峰值是3秒，但是运行5秒触发服务降级
+2. 让程序出错，int age = 10/0;
+
+这两种方式都会让当前服务不可用，触发服务降级，兜底的方法都是**paymentInfo_TimeOutHandler**
+
+
+
+**feign-hystrix80消费客户端对自己进行服务降级：**
+
+先在application.yml里面对OpenFeign进行超时控制，注意，这里要和Hystrix的延时一致：
+
+~~~yaml
+feign:
+  # 开启hystrix支持
+  hystrix:
+    enabled: true
+  client:
+    config:
+      default:
+        # 设置feign客户端超时时间
+        # 指的是建立连接后从服务器读取到可用资源所用的时间，单位：毫秒
+        read-timeout: 1500
+        # 指的是建立连接所用的时间，适用于网络状况正常的情况下，两端连接所用的时间
+        connect-timeout: 1500
+
+~~~
+
+主启动类加入@EnableHystrix
+
+~~~java
+@SpringBootApplication
+@EnableFeignClients
+@EnableHystrix
+public class OrderHystrixMain80 {
+    public static void main(String[] args) {
+        SpringApplication.run(OrderHystrixMain80.class, args);
+    }
+}
+
+~~~
+
+OrderHystrixController里面改装paymentInfo_TimeOut函数：
+
+~~~java
+
+    @GetMapping(value = "/consumer/payment/hystrix/timeout/{id}")
+    //这个方法一旦出事，就自动调用fallbackMethod
+    @HystrixCommand(fallbackMethod = "paymentTimeoutFallbackMethod",commandProperties = {
+            @HystrixProperty(name = "execution.isolation.thread.timeoutInMilliseconds",value="1500")
+    })
+    public String paymentInfo_TimeOut(@PathVariable("id") Integer id){
+        return paymentHystrixService.paymentInfo_TimeOut(id);
+    }
+    public String paymentTimeoutFallbackMethod(@PathVariable("id") Integer id){
+        return "我是消费者80，对方支付系统繁忙请10秒钟后再试 或 自己运行出错，请检查自己o(╥﹏╥)o";
+    }
+~~~
+
+#### Hystrix服务降级
+
+目前问题：
+
+* 每个业务方法对应一个兜底的方法，代码膨胀
+* 兜底的方法和业务逻辑混在一起，代码混乱（耦合）
+
+##### 未来可能遇到的异常
+
+* 运行异常（程序报错）
+* 超时
+* 宕机
+
+##### Hystrix 全局服务降级：解决代码膨胀
+
+使用**Hystrix全局服务降级**:  @DefaultProperties(defaultFallback = "函数名")
+
+上面的配置是 1对1 ，每个方法配置一个服务降级方法，技术上可以，实际上傻X
+
+这里采用的方法是 1对N ：除了个别重要核心业务有专属，其它普通的可以通过@DefaultProperties(defaultFallback = "函数名") 统一跳转到同一个处理结果的接口。
+
+**通用的和独享的各自分开，避免了代码膨胀，合理减少了代码量，O(∩_∩)O哈哈~**
+
+​      **步骤：**
+
+  1. 在hystrix80客户端controller添加全局兜底fallback函数
+
+     ~~~java
+      //下面是全局兜底fallback方法
+         public String paymentGlobalFallbackMethod(){
+             return "全局Global异常处理信息，请稍后再试。 o(╥﹏╥)o";
+         }
+     ~~~
+
+  2.  在整个controller添加注解，配置全局兜底
+
+    ~~~java
+    @RestController
+    @DefaultProperties(defaultFallback = "paymentGlobalFallbackMethod")
+    public class OrderHystrixController {
+        ...
+    }
+    ~~~
+
+3.  如果你需要兜底的方法只写了@HystrixCommand注解，而没有单独配置里面的属性，则会使用全局兜底的函数
+
+   ~~~java
+       //如果出错，就跑到全局的兜底函数那
+       @HystrixCommand
+       public String paymentInfo_TimeOut(@PathVariable("id") Integer id){
+           return paymentHystrixService.paymentInfo_TimeOut(id);
+       }
+   ~~~
+
+
+
+##### Hystrix通配服务降级：解决代码耦合
+
+如果一个一个对方法进行服务降级进行注解，会导致耦合度过高。
+
+这里设计一个案例，客户端去调用服务端，碰上服务端突然宕机或者关闭。
+
+本次案例服务降级是在**客户端80实现完成的**，与服务端8001没有关系，**只需要为Feign客户端定义的接口添加一个服务降级处理的实现类即可实现解耦。**
+
+
+
+这里的案例模拟宕机，在通过客户端80访问服务端8001的时候，关闭8001，然后80端刷新就触发了兜底。
+
+##### 如何配置通配服务降级
+
+采用实现接口的方式，因为在OpenFeign中，客户端是直接使用接口去调用服务端的，所以通过实现这个接口，重写里面的方法，这样在8001寄掉的时候，接口就会访问你的实现类的方法，实现通配兜底。
+
+用一个类来实现接口，它就是通配的兜底类，所有方法的Fallback全部在这里面定义
+
+~~~java
+@Component
+public class PaymentFallbackService implements PaymentHystrixService{
+    @Override
+    public String paymentInfo_OK(Integer id) {
+        return "PaymentFallbackService兜底类 的 paymentInfo_OK 方法";
+    }
+
+    @Override
+    public String paymentInfo_TimeOut(Integer id) {
+        return "PaymentFallbackService兜底类 的 paymentInfo_TimeOut 方法";
+    }
+}
+
+~~~
+
+这样就实现了通配服务降级，而且还解除了耦合。
+
+
+
+#### Hystrix服务熔断
+
+##### 熔断机制概述
+
+熔断机制是应对雪崩效应的一种微服务链路保护机制。当扇出链路的某个微服务出错不可用或者响应时间太长时，会进行服务的降级，进而熔断该节点微服务的调用，快速返回错误的响应信息。
+
+**当检测到该节点微服务调用响应正常后，恢复调用链路。**
+
+
+
+在Spring Cloud框架里，熔断机制通过Hystrix实现。Hystrix会监控微服务间调用的状况。
+
+当失败的调用到一定阈值，缺省是5秒内20次调用失败，就会启动熔断机制。
+
+**熔断机制的注解是@HystrixCommand**
+
+
+
+##### 服务熔断过程（重点）
+
+1. 调用失败会触发降级，而降级会调用fallback方法
+2. 但是无论如何降级的流程一定会先调用正常方法，正常方法报错或不符合条件再调用fallback方法
+3. 假如单位时间内调用失败次数过多，也就是降级次数过多，则触发熔断
+4. 熔断以后就会跳过正常方法直接调用fallback方法
+5. 所谓“熔断后服务不可用”就是因为跳过了正常方法直接执行fallback
+
+
+
+##### 服务熔断总结
+
+###### 熔断状态类型
+
+* 熔断打开状态（把“电闸”断开）：请求不再进行调用当前服务，内部设置时钟一般为MTTR (平均故障处理时间)，当打开时长达到所设的时间，则进入半熔断状态。
+* 熔断关闭状态（把“电闸”闭合）：熔断关闭不会对服务进行熔断
+* 熔断半开状态：部分请求根据规则调用当前服务，如果请求成功且符合规则则认为当前服务恢复正常，关闭熔断
+
+
+
+###### 涉及到断路器的三个重要参数
+
+~~~java
+  @HystrixCommand(fallbackMethod = "paymentCircuitBreaker_fallback",commandProperties = {
+            @HystrixProperty(name = "circuitBreaker.enabled",value = "true"),  // 是否开启断路器
+            @HystrixProperty(name = "circuitBreaker.requestVolumeThreshold",value = "10"),  // 请求次数的峰值：如果实际请求超过了峰值，熔断器将会从关闭状态转换成打开状态
+            @HystrixProperty(name = "circuitBreaker.sleepWindowInMilliseconds",value = "10000"), // 断路后的休眠时间窗，在这么多毫秒内如果请求错误减少，满足条件后主逻辑会恢复
+            @HystrixProperty(name = "circuitBreaker.errorThresholdPercentage",value = "60"), // 失败率达到多少后跳闸，注意单位是百分数
+    })
+    public String paymentCircuitBreaker(@PathVariable("id") Integer id){
+        ......
+    }
+~~~
+
+* 快照时间窗
+
+要确定**断路器是否打开**，需要统计一些请求和错误数据，而**统计的时间范围就是快照时间窗**，默认为最近的10秒。
+
+* 请求总数阈值
+
+ 在**快照时间窗**内，必须满足请求总数阈值才有资格熔断。默认为10，意味着在10秒内，**如果该Hystrix命令的调用次数不足20次，即使所有的请求都超时或其它原因失败，断路器都不会打开。**
+
+* 错误百分比阈值
+
+  当**请求总数在快照时间窗内超过了阈值**，比如发生了30次调用，如果在这30次调用中，有15次发生了超时异常，也就是超过50%的错误百分比，在默认设定50%阈值的情况下，这时候就会将断路器打开。
+
+
+
+#### Hystrix服务限流
+未完待续....
 
 
 

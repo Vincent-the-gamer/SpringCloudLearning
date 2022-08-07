@@ -6,3 +6,16 @@ eureka:
     register-with-eureka: false
     service-url:
       defaultZone: http://localhost:7001/eureka
+
+feign:
+  # 开启hystrix支持
+  hystrix:
+    enabled: true
+  client:
+    config:
+      default:
+        # 设置feign客户端超时时间
+        # 指的是建立连接后从服务器读取到可用资源所用的时间，单位：毫秒
+        read-timeout: 1500
+        # 指的是建立连接所用的时间，适用于网络状况正常的情况下，两端连接所用的时间
+        connect-timeout: 1500
