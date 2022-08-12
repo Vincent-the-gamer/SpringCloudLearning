@@ -1442,7 +1442,279 @@ public class PaymentFallbackService implements PaymentHystrixService{
 
 
 #### Hystrix服务限流
-未完待续....
 
+这块在SpringCloud Alibaba的时候，用Sentinel来学了，Hystrix现在已经几乎淘汰了
+
+
+
+#### Hystrix图形化Dashboard搭建
+
+除了隔离依赖服务的调用以外，Hystrix还提供了<font color="red">**准实时的调用监控（Hystrix Dashboard)**</font>，Hystrix会持续地记录所有通过Hystrix发起的请求的执行信息，并以统计报表和图形的形式展示给用户，包括每秒执行多少请求，多少成功，多少失败等。Netflix通过**hystrix-metrics-event-stream**项目实现了对以上指标的监控。SpringCloud也提供了Hystrix Dashboard的整合，对监控内容转化成可视化界面。
+
+**方法：使用新注解，在启动类上加入@EnableHystrixDashboard**
+
+**所有的Provider微服务提供类（8001/8002/8004）都需要监控依赖配置**
+
+
+
+**注意几个坑：**
+
+1. **监控者Dashboard和被监控的服务，pom中一定要添加web和actuator的starter**
+
+~~~xml
+<dependency>
+     <groupId>org.springframework.boot</groupId>
+     <artifactId>spring-boot-starter-web</artifactId>
+</dependency>
+<dependency>
+     <groupId>org.springframework.boot</groupId>
+     <artifactId>spring-boot-starter-actuator</artifactId>
+</dependency>
+~~~
+
+2. **新版本Hystrix需要在主启动类PaymentHystrixMain8001中指定监控路径**
+
+~~~java
+/*
+    此配置是为了服务监控而配置，与服务容错本身无关，这是springcloud升级后的坑
+    ServletRegistrationBean配置是因为SpringBoot的默认路径不是"/hystrix.stream"
+    只要在自己的项目里配置上下面的servlet就可以了
+     */
+    @Bean
+    public ServletRegistrationBean getServlet(){
+        HystrixMetricsStreamServlet streamServlet = new HystrixMetricsStreamServlet();
+        ServletRegistrationBean registrationBean = new ServletRegistrationBean(streamServlet);
+        registrationBean.setLoadOnStartup(1);
+        registrationBean.addUrlMappings("/hystrix.stream");
+        registrationBean.setName("HystrixMetricsStreamServlet");
+        return registrationBean;
+    }
+~~~
+
+
+
+开始监控：
+
+9001监控8001
+
+dashboard地址：http://localhost:9001/hystrix
+
+监控时输入： http://localhost:8001/hystrix.stream  （按照上面servlet配置的来）
+
+使用正确的和错误的来测试，观察monitor的变化
+
+正确：id是正数 http://localhost:8001/payment/circuit/2
+
+错误：id是负数 http://localhost:8001/payment/circuit/-2
+
+![](http://124.222.43.240:2334/upload/2022-8-8$68427CtQQ6.png)
+
+
+
+## 服务网关
+
+如果有必要，单独去学习一下Zuul，这里主要学习Gateway。
+
+### Gateway
+
+#### 官网
+
+Zuul 1.x: https://github.com/Netflix/zuul
+
+**Gateway（版本要和SpringBoot对应上**）: https://cloud.spring.io/spring-cloud-static/spring-cloud-gateway/2.2.1.RELEASE/reference/html
+
+#### Gateway是啥？
+
+Cloud全家桶中，很重要的组件就是网关，在1.x版本中都是采用的Zuul网关。
+
+但在2.x版本中，zuul的升级一直跳票，SpringCloud最后自己研发了一个网关代替Zuul
+
+那就是**SpringCloud Gateway**。
+
+**Gateway是Zuul 1.x版的替代。**
+
+
+
+Gateway是在Spring生态系统之上构建的API网关服务，基于Spring 5，Spring Boot 2和Project Reactor等技术。
+
+Gateway旨在提供一种简单而有效的方式来对API进行路由，以及提供一些强大的过滤器功能，例如：熔断，限流，重试等。 
+
+
+
+**SpringCloud Gateway使用的Webflux中的reactor-netty响应式编程组件，底层使用了Netty通讯框架。**
+
+#### Gateway能干啥？
+
+* 反向代理
+* 鉴权
+* 流量控制
+* 日志监控
+* ....
+
+#### 微服务架构中网关在哪里
+
+![](http://124.222.43.240:2334/upload/2022-8-12$82515aAmYh.png)
+
+
+
+#### 有Zuul了怎么又出来了Gateway?
+
+##### 我们为什么选择Gateway
+
+1. netflix不太靠谱，zuul2.0一直跳票
+
+2. SpringCloud Gateway具有如下特性：
+
+   * **基于Spring Framework 5，Project Reactor 和 Spring Boot 2.0进行构建。**
+
+   * 动态路由：能够匹配任何请求属性。
+   * 可以对路由指定 Predicate（断言）和 Filter（过滤器）
+   * 集成了 SpringCloud 服务发现功能
+   * 易于编写的 Predicate（断言）和 Filter（过滤器）
+   * 请求限流功能
+   * 支持路径重写
+
+#### WebFlux
+
+Gateway有一个WebFlux，**它是一个非阻塞的Web框架**。
+
+传统的Web框架，比如struts2，SpringMVC等都是基于Servlet API与Servlet容器基础之上运行的。
+
+**在Servlet 3.1之后有了异步非阻塞的支持。**而WebFlux是一个典型非阻塞异步的框架，它的核心是基于Reactor相关API实现的。相对于传统的Web框架来说，它可以运行在诸如Netty，Undertow及支持Servlet3.1的容器上。非阻塞式+函数式编程（Spring 5必须让你使用java8）
+
+
+
+#### Gateway三大核心概念
+
+* Route（路由）
+
+  路由是构建网关的基本模块，它由ID，目标URI，一系列的断言和过滤器组成，如果断言为true则匹配该路由。
+
+* Predicate（断言）
+
+  参考Java8的java.util.function.Predicate
+
+  开发人员可以匹配HTTP请求中的所有内容（例如请求头或请求参数），**如果请求与断言相匹配则进行路由**。
+
+* Filter (过滤)
+
+​       指的是Spring框架中GatewayFilter的实例，使用过滤器，可以在请求被路由之前或者之后对请求进行修改。
+
+**总结**：
+
+Web请求，通过一些匹配条件，定位到真正的服务节点。并在这个转发过程的前后，进行一些精细化控制。
+
+predicate就是我们的匹配条件。
+
+而Filter就可以理解为一个无所不能的拦截器。有了这两个元素，再加上目标uri，就可以实现一个具体的路由了
+
+
+
+#### Gateway核心逻辑
+
+路由转发 + 执行过滤器链
+
+![](http://124.222.43.240:2334/upload/2022-8-12$417055hEMC.png)
+
+##### 主要流程
+
+客户端向SpringCloud Gateway发出请求。然后在Gateway Handler Mapping 中找到与请求相匹配的路由，将其发送到Gateway Web Handler。
+
+Handler 再通过指定的过滤器链来将请求发送到我们实际的服务执行业务逻辑，然后返回。
+
+过滤器之间用虚线分开是因为过滤器可能会在发送代理请求之前（pre）或之后（post）执行业务逻辑。
+
+Filter在 “pre” 类型的过滤器可以做参数校验、权限校验、流量监控、日志输出、协议转换等，
+
+在 “post” 类型的过滤器中可以做响应内容，响应头的修改，日志的输出，流量监控等有着非常重要的作用。
+
+
+
+#### Gateway网关搭建（使用9527端口）
+
+1. 第一种配置方式
+
+在9527的application.yml中配置：
+
+~~~yaml
+server:
+  port: 9527
+
+spring:
+  application:
+    name: cloud-gateway
+  cloud:
+    # Gateway网关配置
+    gateway:
+      routes: # 路由
+        - id: payment_route # 路由的ID, 没有固定规则，但要求唯一，建议配合服务名
+          uri: http://localhost:8001 # 匹配后提供服务的路由地址
+          predicates: # 断言
+            - Path=/payment/get/**  # 路径相匹配的进行路由
+            -
+        - id: payment_route2 # 路由的ID, 没有固定规则，但要求唯一，建议配合服务名
+          uri: http://localhost:8001 # 匹配后提供服务的路由地址
+          predicates: # 断言
+            - Path=/payment/lb/**  # 路径相匹配的进行路由
+eureka:
+  instance:
+    hostname: cloud-gateway-service
+  client: # 服务提供者provider注册进eureka服务列表内
+    service-url:
+       register-with-eureka: true
+       fetch-registry: true
+       defaultZone: http://localhost:7001/eureka
+
+~~~
+
+
+
+注意pom依赖添加gateway的，然后不要添加web和actuator
+
+~~~xml
+<dependencies>
+    <dependency>
+        <groupId>org.springframework.cloud</groupId>
+        <artifactId>spring-cloud-starter-gateway</artifactId>
+    </dependency>
+    <!--eureka-client-->
+    <dependency>
+        <groupId>org.springframework.cloud</groupId>
+        <artifactId>spring-cloud-starter-netflix-eureka-client</artifactId>
+    </dependency>
+    <!--  引入自定义的cloud-api-commons模块，来访问实体类   -->
+    <dependency>
+        <groupId>com.guifeng</groupId>
+        <artifactId>cloud-api-commons</artifactId>
+        <version>1.0</version>
+    </dependency>
+</dependencies>
+~~~
+
+
+
+2. 第二种配置方式：
+
+   代码中注入RouteLocator的Bean，配合@Configuration和@Bean来进行编程式配置
+
+   ~~~java
+   @Configuration
+   public class GateWayConfig {
+       /*
+       配置了一个id为path_route_guifeng的路由规则
+       当访问地址为： http://localhost:9527/guonei时会自动转发到地址：http://news.baidu.com/guonei
+        */
+       @Bean
+       public RouteLocator customRouteLocator(RouteLocatorBuilder routeLocatorBuilder){
+           RouteLocatorBuilder.Builder routes = routeLocatorBuilder.routes();
+           // http://news.baidu.com/guonei
+           routes.route("path_route_guifeng",r -> r.path("/guonei").uri("http://news.baidu.com/guonei"));
+           return routes.build();
+       }
+   }
+   
+   ~~~
+
+未完待续。。。。。
 
 
