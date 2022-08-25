@@ -4,19 +4,29 @@ server:
 spring:
   application:
     name: cloud-gateway
-#  cloud:
-#    # Gateway网关配置
-#    gateway:
-#      routes: # 路由
-#        - id: payment_route # 路由的ID, 没有固定规则，但要求唯一，建议配合服务名
+  cloud:
+    # Gateway网关配置
+    gateway:
+      discovery:
+        locator:
+          enabled: true # 开启从注册中心动态创建路由的功能，利用微服务名进行路由
+      routes: # 路由
+        - id: payment_route # 路由的ID, 没有固定规则，但要求唯一，建议配合服务名
 #          uri: http://localhost:8001 # 匹配后提供服务的路由地址
-#          predicates: # 断言
-#            - Path=/payment/get/**  # 路径相匹配的进行路由
-#
-#        - id: payment_route2 # 路由的ID, 没有固定规则，但要求唯一，建议配合服务名
+          uri: lb://cloud-payment-service # 匹配后提供服务的路由地址
+          predicates: # 断言
+            - Path=/payment/get/**  # 路径相匹配的进行路由
+
+        - id: payment_route2 # 路由的ID, 没有固定规则，但要求唯一，建议配合服务名
 #          uri: http://localhost:8001 # 匹配后提供服务的路由地址
-#          predicates: # 断言
-#            - Path=/payment/lb/**  # 路径相匹配的进行路由
+          uri: lb://cloud-payment-service # 匹配后提供服务的路由地址
+          predicates: # 断言
+            - Path=/payment/lb/**  # 路径相匹配的进行路由
+            - After=2022-08-25T15:49:48.325+08:00[Asia/Shanghai]  # 在这个时间以后，这个路由才会生效
+            - Cookie=touhou,project  # 键值对，可以自定义需要匹配的内容是啥，格式是：Cookie名（键）,正则表达式（值）
+            - Header=X-Request-Id, \d+  # 请求头要有X-Request-Id属性，并且值为整数的正则表达式 (还是键值对)
+            # -Between=xxx,yyy   在xxx和yyy时间之间
+            # -Before=xxx   在这个时间以前，这个路由才会生效
 eureka:
   instance:
     hostname: cloud-gateway-service

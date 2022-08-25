@@ -1715,6 +1715,262 @@ eureka:
    
    ~~~
 
-未完待续。。。。。
+
+
+
+#### 通过微服务名实现动态路由
+
+默认情况下Gateway会根据注册中心注册的服务列表，**以注册中心上微服务名为路径创建动态路由进行转发，从而实现动态路由的功能。**
+
+在9527网关的配置文件中，注意在gateway子项中添加
+
+~~~yaml
+ cloud:
+    # Gateway网关配置
+    gateway:
+      discovery:
+        locator:
+          enabled: true # 开启从注册中心动态创建路由的功能，利用微服务名进行路由
+~~~
+
+然后把gateway的路由uri写成lb://微服务名称，(lb代表负载均衡)
+
+~~~yaml
+ uri: lb://cloud-payment-service # 匹配后提供服务的路由地址
+~~~
+
+完整yml
+
+~~~yaml
+server:
+  port: 9527
+
+spring:
+  application:
+    name: cloud-gateway
+  cloud:
+    # Gateway网关配置
+    gateway:
+      discovery:
+        locator:
+          enabled: true # 开启从注册中心动态创建路由的功能，利用微服务名进行路由
+      routes: # 路由
+        - id: payment_route # 路由的ID, 没有固定规则，但要求唯一，建议配合服务名
+#          uri: http://localhost:8001 # 匹配后提供服务的路由地址
+          uri: lb://cloud-payment-service # 匹配后提供服务的路由地址
+          predicates: # 断言
+            - Path=/payment/get/**  # 路径相匹配的进行路由
+
+        - id: payment_route2 # 路由的ID, 没有固定规则，但要求唯一，建议配合服务名
+#          uri: http://localhost:8001 # 匹配后提供服务的路由地址
+          uri: lb://cloud-payment-service # 匹配后提供服务的路由地址
+          predicates: # 断言
+            - Path=/payment/lb/**  # 路径相匹配的进行路由
+eureka:
+  instance:
+    hostname: cloud-gateway-service
+  client: # 服务提供者provider注册进eureka服务列表内
+    service-url:
+       register-with-eureka: true
+       fetch-registry: true
+       defaultZone: http://localhost:7001/eureka
+
+~~~
+
+
+
+#### Predicate（断言）的使用
+
+Spring Cloud Gateway将路由匹配作为Spring WebFlux HandlerMapping基础架构的一部分。
+
+Spring Cloud Gateway包括许多内置的Route Predicate工厂。所有这些Predicate都与HTTP请求的不同属性匹配。多个Route Predicate工厂可以进行组合。
+
+Spring Cloud Gateway创建Route对象时，使用 RoutePredicateFactory 创建 Predicate 对象，Predicate 对象可以赋值给Route。Spring Cloud Gateway 包含许多内置的Route Predicate Factories。
+
+所有这些谓词都匹配HTTP请求的不同属性。多种谓词工厂可以组合，并通过逻辑and。
+
+##### 时间断言
+
+* **Before Route Predicate**    在某时间点之前生效
+
+  ~~~yaml
+     predicates: # 断言
+  	- Before=2022-08-25T15:49:48.325+08:00[Asia/Shanghai]  # 在这个时间以前，这个路由才会生效
+  ~~~
+
+* **Between Route Predicate**   在某时间段之间生效
+
+  ~~~yaml
+   predicates: # 断言
+  	- Between=2022-08-25T15:49:48.325+08:00[Asia/Shanghai],2022-08-26T00:00:00.000+08:00[Asia/Shanghai]  # 在xxx和yyy时间之间
+  ~~~
+
+* **After Route Predicate**   在某时间点之后生效
+
+~~~yaml
+ predicates: # 断言
+	- After=2022-08-25T15:49:48.325+08:00[Asia/Shanghai] # 在这个时间以后，这个路由才会生效
+~~~
+
+
+
+##### Cookie断言
+
+**Cookie Route Predicate**
+
+Cookie Route Predicate需要两个参数，一个是Cookie name，一个是正则表达式，
+
+路由规则会通过获取对应的 Cookie name 值和正则表达式去匹配，如果匹配上就会执行路由，如果没有匹配上则不执行。
+
+在lb的路由配置
+
+~~~yaml
+spring:
+  cloud:
+    gateway:
+      routes:
+      - id: payment_route2 # 路由的ID, 没有固定规则，但要求唯一，建议配合服务名     
+        uri: lb://cloud-payment-service # 匹配后提供服务的路由地址
+         predicates: # 断言
+            - Cookie=touhou,project  # 键值对，可以自定义需要匹配的内容是啥，格式是：Cookie名（键）,正则表达式（值） 
+~~~
+
+**使用Curl命令测试接口**
+
+* 不带Cookie测试
+
+  ~~~shell 
+  curl http://localhost:9527/payment/lb
+  {"timestamp":"2022-08-25T08:24:36.171+0000","path":"/payment/lb","status":404,"error":"Not Found","message":null,"requestId":"679ff3d2"}
+  ~~~
+
+  会得到404
+
+* 带上Cookie测试
+
+  ~~~shell
+  curl http://localhost:9527/payment/lb --cookie "touhou=project"
+  8001
+  curl http://localhost:9527/payment/lb --cookie "touhou=project"
+  8002
+  ~~~
+
+  就可以正常访问
+
+
+
+##### 请求头（Header) 断言
+
+**Header Route Predicate**
+
+~~~yaml
+spring:
+  cloud:
+    gateway:
+      routes:
+      - id: payment_route2 # 路由的ID, 没有固定规则，但要求唯一，建议配合服务名     
+        uri: lb://cloud-payment-service # 匹配后提供服务的路由地址
+         predicates: # 断言
+            - Header=X-Request-Id, \d+  # 请求头要有X-Request-Id属性，并且值为整数的正则表达式(还是键值对)
+~~~
+
+* 和Cookie的同理，带上请求头测试
+
+  ~~~shell
+  curl http://localhost:9527/payment/lb -H "X-Request-Id:123"
+  ~~~
+
+
+
+##### 主机 (Host) 断言
+
+**Host Route Predicate**
+
+填写主机IP或者域名：
+
+~~~yaml
+spring:
+  cloud:
+    gateway:
+      routes:
+      - id: payment_route2 # 路由的ID, 没有固定规则，但要求唯一，建议配合服务名     
+        uri: lb://cloud-payment-service # 匹配后提供服务的路由地址
+         predicates: # 断言
+           - Host=www.daixiahu.com
+~~~
+
+带参数测试：
+
+~~~shell 
+curl http://localhost:9527/payment/lb -H "Host:www.daixiahu.com"
+~~~
+
+
+
+##### 方法 (Method) 断言
+
+**Method Route Predicate**
+
+method: GET,POST.....
+
+~~~
+spring:
+  cloud:
+    gateway:
+      routes:
+      - id: payment_route2 # 路由的ID, 没有固定规则，但要求唯一，建议配合服务名     
+        uri: lb://cloud-payment-service # 匹配后提供服务的路由地址
+         predicates: # 断言
+           - Method=GET
+~~~
+
+
+
+##### 路径（Path）断言
+
+**Path Route Predicate**
+
+~~~yaml
+gateway:
+  routes: # 路由
+   - id: payment_route # 路由的ID, 没有固定规则，但要求唯一，建议配合服务名
+   uri: http://localhost:8001 # 匹配后提供服务的路由地址
+   predicates: # 断言
+     - Path=/payment/get/**  # 路径相匹配的进行路由
+~~~
+
+
+
+##### 查询 (Query) 断言
+
+**Query Route Predicate**
+
+查询条件，查询参数要是键值对（其实这里就是query参数）
+
+~~~yaml
+gateway:
+  routes: # 路由
+   - id: payment_route # 路由的ID, 没有固定规则，但要求唯一，建议配合服务名
+   uri: http://localhost:8001 # 匹配后提供服务的路由地址
+   predicates: # 断言
+     - Query=remilia, \d+ # 要有参数名username，并且值还要是正数才能路由
+~~~
+
+http://localhost:8001/payment/lb?remilia=10   参数是正数，正常访问
+
+http://localhost:8001/payment/lb?remilia=-10   参数是负数，404
+
+
+
+#### Predicate总结
+
+说穿了，Predicate就是为了实现一组匹配规则，让请求过来找到对应的Route进行处理。
+
+
+
+
+
+## 服务配置
+
 
 
